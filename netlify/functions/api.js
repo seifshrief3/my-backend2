@@ -105,9 +105,10 @@ const buildMessageText = ({ source, leadData, filesLinks, servicesList }) => {
 // ================= ROUTES =================
 
 // health check
-app.get("/", (req, res) => {
+app.use((req, res) => {
   res.send("API is running on Netlify ✅");
 });
+
 
 // main endpoint
 app.post(
