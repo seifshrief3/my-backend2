@@ -13,7 +13,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '8433844275:AAFRpIdSOi5NJs3pyUPVkKmzr
 const CHAT_ID = process.env.CHAT_ID || '-1003383269388';
 
 const app = express();
-const router = express.Router(); // بنستخدم Router عشان المسارات
+const router = express.Router();
 
 app.use(cors());
 app.use(express.json());
@@ -29,6 +29,22 @@ const escapeHTML = (text) => {
   return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 };
 
+// قاموس لترجمة الحقول للعربية عشان تظهر بشكل شيك في تيليجرام
+const fieldLabels = {
+  clientName: "اسم العميل",
+  fullName: "الاسم الكامل",
+  whatsappNumber: "رقم الواتساب",
+  whatsapp: "واتساب",
+  phoneNumber: "رقم الهاتف",
+  phone: "الهاتف",
+  visaType: "نوع التأشيرة",
+  center: "المركز",
+  serviceType: "نوع الخدمة",
+  appointmentDate: "تاريخ الموعد",
+  selectedServices: "الخدمات المختارة",
+  source: "المصدر"
+};
+
 async function uploadToTelegram(filePath, fileName, caption) {
   const form = new FormData();
   form.append("chat_id", CHAT_ID);
@@ -40,69 +56,79 @@ async function uploadToTelegram(filePath, fileName, caption) {
     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, form, {
       headers: form.getHeaders(),
     });
-    return `✅ [تم رفع: ${escapeHTML(fileName)}]`;
+    return true;
   } catch (error) {
-    return `❌ [فشل رفع: ${escapeHTML(fileName)}]`;
+    console.error("Telegram Upload Error:", error.message);
+    return false;
   }
 }
 
-// 1. خلى المسار بيبدأ بـ / مباشرة جوه الـ router
 router.post("/send-lead", upload.fields([
-  { name: "visaDocument", maxCount: 100 },
-  { name: "passportImage", maxCount: 100 },
-  { name: "RecruitmentForm", maxCount: 100 },
+  { name: "visaDocument", maxCount: 10 },
+  { name: "passportImage", maxCount: 10 },
+  { name: "RecruitmentForm", maxCount: 10 },
 ]), async (req, res) => {
   const leadData = req.body;
-  const { source } = leadData;
   const files = req.files || {};
-
-  if (!source) return res.status(400).json({ success: false, message: "Missing source" });
-
   const tempFilesToDelete = [];
-  const filesLinks = { RecruitmentForm: [], passportImage: [], visaDocument: [] };
 
   try {
-    for (const field of Object.keys(filesLinks)) {
-      if (files[field]) {
-        for (const file of files[field]) {
-          const caption = `📄 ${field}\n👤 عميل: ${leadData.clientName || leadData.fullName}`;
-          const status = await uploadToTelegram(file.path, file.originalname, caption);
-          filesLinks[field].push(status);
-          tempFilesToDelete.push(file.path);
-        }
+    // 1. بناء نص الرسالة بشكل ديناميكي
+    let messageBody = `🎉 <b>طلب جديد من: ${escapeHTML(leadData.source || "الموقع")}</b> 🎉\n\n`;
+
+    for (const [key, value] of Object.entries(leadData)) {
+      // تخطي حقل الـ source لأنه في العنوان
+      if (key === "source") continue;
+
+      let displayValue = value;
+      // لو البيانات عبارة عن Array (زي الخدمات المختارة) نحولها لنص
+      if (key === "selectedServices" && value) {
+        try {
+          const parsed = JSON.parse(value);
+          displayValue = Array.isArray(parsed) ? parsed.join(" - ") : value;
+        } catch (e) { displayValue = value; }
       }
+
+      const label = fieldLabels[key] || key; // استخدم الترجمة أو اسم الحقل الأصلي
+      messageBody += `👤 <b>${label}:</b> ${escapeHTML(displayValue)}\n`;
     }
 
-    let servicesList = "لا يوجد خدمات إضافية";
-    if (leadData.selectedServices) {
-      servicesList = leadData.selectedServices; // بسطناها للتجربة
-    }
-
-    const messageText = `🎉 <b>طلب جديد - ${escapeHTML(source)}</b> 🎉\n\n👤 <b>العميل:</b> ${escapeHTML(leadData.clientName || leadData.fullName)}\n📞 <b>واتساب:</b> ${escapeHTML(leadData.whatsappNumber || leadData.whatsapp)}`;
-
+    // 2. إرسال البيانات النصية أولاً
     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       chat_id: CHAT_ID,
-      text: messageText,
+      text: messageBody,
       parse_mode: "HTML",
     });
 
-    res.json({ success: true, message: "Processed successfully" });
+    // 3. إرسال الملفات (كل ملف برسالة منفصلة مع كابشن صغير)
+    const clientDisplayName = leadData.clientName || leadData.fullName || "غير معروف";
+
+    for (const fieldName of Object.keys(files)) {
+      for (const file of files[fieldName]) {
+        const fileLabel = fieldLabels[fieldName] || fieldName;
+        const caption = `📄 <b>${fileLabel}</b>\n👤 عميل: ${escapeHTML(clientDisplayName)}`;
+
+        await uploadToTelegram(file.path, file.originalname, caption);
+        tempFilesToDelete.push(file.path);
+      }
+    }
+
+    res.json({ success: true, message: "تم إرسال البيانات والملفات بنجاح ✅" });
   } catch (error) {
+    console.error("Main Error:", error.message);
     res.status(500).json({ success: false, error: error.message });
   } finally {
+    // تنظيف الملفات المؤقتة
     for (const filePath of tempFilesToDelete) {
       try { await fsp.unlink(filePath); } catch (e) { }
     }
   }
 });
 
-// 2. ده الهيلث تشيك خليه يشتغل بس لو المسار فاضي
 router.get("/", (req, res) => {
   res.send("API is working! Use POST /send-lead to send data.");
 });
 
-// 3. الربط السحري لـ Netlify
-// لو ملفك اسمه api.js يبقى المسار هو /.netlify/functions/api
 app.use("/.netlify/functions/api", router);
 
 export const handler = serverless(app);
